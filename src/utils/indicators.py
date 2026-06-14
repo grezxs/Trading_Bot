@@ -65,12 +65,11 @@ def bollinger(prices: Sequence[float], window: int = 20, num_std: float = 2.0):
 
 
 def _ema(p: np.ndarray, span: int) -> np.ndarray:
-    """Exponential moving average over the whole series."""
+    """Exponential moving average over the whole series (vectorized via lfilter)."""
     alpha = 2.0 / (span + 1.0)
-    out = np.empty_like(p)
-    out[0] = p[0]
-    for i in range(1, p.size):
-        out[i] = alpha * p[i] + (1 - alpha) * out[i - 1]
+    from scipy.signal import lfilter
+    zi = np.array([p[0] * (1 - alpha)])
+    out, _ = lfilter([alpha], [1, -(1 - alpha)], p, zi=zi)
     return out
 
 
