@@ -60,6 +60,54 @@ def compute_metrics(result: "BacktestResult") -> dict[str, Any]:
 
     fees = sum(t.fee for t in result.trades)
 
+    # --- Sortino ratio (downside deviation only) ---
+    sortino = 0.0
+    if len(rets) > 1:
+        neg = [r for r in rets if r < 0]
+        if neg:
+            down_dev = math.sqrt(sum(r * r for r in neg) / len(rets))
+            if down_dev > 0:
+                ppy = (365 * 24 * 3600) / max(1, timeframe_seconds(result.timeframe))
+                sortino = (statistics.mean(rets) / down_dev) * math.sqrt(ppy)
+
+    # --- Calmar ratio (annualised return / max drawdown) ---
+    calmar = 0.0
+    if max_dd_pct > 0 and len(eq) > 1:
+        total_bars = len(eq) - 1
+        bar_sec = max(1, timeframe_seconds(result.timeframe))
+        years = max(1e-9, total_bars * bar_sec / (365 * 24 * 3600))
+        ann_ret = (final / start) ** (1.0 / years) - 1 if start > 0 else 0.0
+        calmar = ann_ret / max_dd_pct
+
+    # --- max consecutive losses ---
+    max_consec_loss = 0
+    cur_consec = 0
+    for r in realized:
+        if r < 0:
+            cur_consec += 1
+            max_consec_loss = max(max_consec_loss, cur_consec)
+        else:
+            cur_consec = 0
+
+    # --- average holding period (seconds between paired entry/exit) ---
+    avg_hold_sec = 0.0
+    open_ts: dict[str, float] = {}
+    hold_durations: list[float] = []
+    for t in result.trades:
+        key = t.side  # BUY opens, SELL closes (spot only)
+        if t.side == "BUY":
+            open_ts[t.reason] = t.ts
+        elif t.side == "SELL" and open_ts:
+            earliest = min(open_ts.values())
+            hold_durations.append(t.ts - earliest)
+            open_ts.clear()
+    if hold_durations:
+        avg_hold_sec = statistics.mean(hold_durations)
+
+    # --- average win / average loss ---
+    avg_win = statistics.mean(wins) if wins else 0.0
+    avg_loss = statistics.mean(losses) if losses else 0.0
+
     return {
         "bars": len(eq),
         "final_equity": round(final, 2),
@@ -69,11 +117,17 @@ def compute_metrics(result: "BacktestResult") -> dict[str, Any]:
         "max_drawdown_abs": round(max_dd_abs, 2),
         "max_drawdown_pct": round(max_dd_pct * 100, 2),
         "sharpe": round(sharpe, 2),
+        "sortino": round(sortino, 2),
+        "calmar": round(calmar, 2),
         "num_trades": len(result.trades),
         "num_closing_trades": n_closing,
         "win_rate_pct": round(win_rate * 100, 1),
         "profit_factor": (round(profit_factor, 2)
                           if profit_factor != float("inf") else None),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "max_consec_losses": max_consec_loss,
+        "avg_hold_seconds": round(avg_hold_sec, 1),
         "fees_paid": round(fees, 4),
         "halted_on_drawdown": result.halted,
     }
