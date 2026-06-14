@@ -1,0 +1,91 @@
+# Trading bot configuration. NO secrets here — API keys come from env vars.
+
+symbols:
+  - BTC/USDT
+  - ETH/USDT
+
+intervals:
+  market_sec: 10      # pull market data ~every 10s
+  signal_sec: 60      # generate a signal ~every 1 min
+  regime_window: 30   # z-score/vol window in SAMPLES; 30 x market_sec ≈ 300s (5 min)
+
+data:
+  # Where MARKET DATA (order book + klines) comes from:
+  #   mainnet -> real Binance market data, read-only, NO api key (recommended)
+  #   testnet -> Binance testnet paper data (prices diverge from real market)
+  # NOTE: this only affects the DATA feed. ORDERS always go to the testnet
+  # paper account (the broker is locked to sandbox) — see brief's TESTNET-ONLY rule.
+  source: "mainnet"
+  timeframe: "1m"     # kline timeframe for strategy indicators (RSI/BB/MACD/MA)
+  kline_limit: 100    # number of OHLCV bars kept per symbol
+  book_depth: 10      # order-book levels per side (bid/ask depth)
+
+portfolio:
+  starting_cash: 10000   # quote (USDT) — used for mock + accounting baseline
+
+risk:
+  max_position_value: 200   # max notional per order (above testnet min notional ~$5-10)
+  max_position_qty: 1.0     # hard cap on base-asset qty per order
+  max_drawdown: 0.20        # halt if equity falls 20% below peak
+  var_window: 60            # bars for historical VaR (10-min @ 10s) — TODO
+
+regime:
+  trend_z: 1.0        # |z-score| above this => TRENDING
+  highvol_mult: 2.0   # vol above mult*baseline => HIGH_VOL
+
+execution:
+  taker_fee: 0.001    # 0.1% mock taker fee
+  limit_ttl_sec: 5    # limit-order TTL (lifecycle TODO)
+
+# --- Order / trade policy. The knobs you tweak day to day. Edit values here and
+#     restart; no code changes needed. (Sizing / TP-SL / limit-lifecycle get
+#     fully wired in Part 4-5; this is the single source of truth they read.) ---
+order:
+  # 1) Order type --------------------------------------------------------------
+  type: "market"          # "market" = fill now at book price | "limit" = rest on book
+  limit_offset_bps: 5     # LIMIT only: price this many bps inside mid
+                          #   (buy below mid / sell above mid). 0 = at mid.
+  time_in_force: "GTC"    # LIMIT only: GTC (rest) | IOC (kill remainder) | FOK (all-or-none)
+
+  # 2) Position size per order — pick ONE mode, set its value -------------------
+  sizing: "notional"      # "notional" (quote USDT) | "base" (coin qty) |
+                          #   "pct_equity" (% of equity) | "allin" (all free cash)
+  notional_usdt: 100      # sizing=notional   -> ~100 USDT per order
+  base_qty: 0.0001        # sizing=base       -> 0.0001 BTC per order
+  pct_equity: 0.10        # sizing=pct_equity -> 10% of equity per order
+  allin_buffer_pct: 0.01  # sizing=allin: keep 1% cash aside so fees never overdraw
+
+  # 3) Exit policy: take-profit / stop-loss (measured from entry price) ---------
+  take_profit_pct: 0.03   # +3% -> close the position. 0 disables.
+  stop_loss_pct: 0.03     # -3% -> close the position. 0 disables.
+  trailing_stop_pct: 0.0  # trail the peak by this %. 0 disables.
+
+  # 3b) Inventory balancing: keep each symbol's held notional near a target ----
+  #     band. When holdings drift ABOVE target*(1+tolerance), trim (SELL) the
+  #     excess back to target. Complements max_position_value_per_symbol (which
+  #     only blocks adding) by actively reducing an over-weight position.
+  inventory_balance: false       # true = enable the trim-to-target rebalance
+  inventory_target_usdt: 100     # desired held notional per symbol (USDT)
+  inventory_tolerance_pct: 0.25  # drift allowed before trimming (0.25 = +25%)
+
+  # 4) Unfilled-limit handling -------------------------------------------------
+  cancel_unfilled: true   # auto-cancel a limit that hasn't filled within ttl_sec
+  ttl_sec: 5              # seconds an unfilled limit lives before cancel
+
+  # 5) Safety / throttle (recommended additions) -------------------------------
+  trading_enabled: true   # master kill-switch: false = log signals, place NO orders
+  max_position_value_per_symbol: 200  # cap TOTAL held notional per symbol (USDT);
+                          #   shrinks/blocks a BUY that would push the symbol's
+                          #   marked position above this. Stops continuous adding.
+  max_open_positions: 2   # cap how many symbols can be held at once
+  cooldown_sec: 30        # min seconds between orders on the SAME symbol (anti-overtrade)
+  min_notional_usdt: 10   # skip dust orders below the exchange min-notional
+  max_slippage_bps: 50    # MARKET only: abort if fill is >0.5% off the ref price
+  daily_max_loss_pct: 0.10 # halt for the day if realized PnL <= -10% of start cash
+
+# Mock-mode-only knobs (offline synthetic data).
+mock:
+  ticks: 300          # number of market ticks then stop + print summary
+  tick_sleep: 0.0     # seconds between ticks (0 = run as fast as possible)
+  vol: 0.002          # per-tick volatility of the synthetic walk
+  seed: 42

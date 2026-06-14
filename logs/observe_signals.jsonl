@@ -1,0 +1,4 @@
+{"ts": 1780658050.835124, "iso": "2026-06-05T11:14:10.835124+00:00", "symbol": "BTC/USDT", "side": "SELL", "price": 62333.085, "magnitude": 0.4306658078534396, "strategy": "momentum"}
+{"ts": 1780658050.921552, "iso": "2026-06-05T11:14:10.921552+00:00", "symbol": "ETH/USDT", "side": "SELL", "price": 1670.725, "magnitude": 0.4336899666514432, "strategy": "momentum"}
+{"ts": 1780658460.403548, "iso": "2026-06-05T11:21:00.403548+00:00", "symbol": "ETH/USDT", "side": "BUY", "price": 1679.005, "magnitude": 0.7817893314704529, "strategy": "momentum"}
+{"ts": 1780658531.995651, "iso": "2026-06-05T11:22:11.995651+00:00", "symbol": "ETH/USDT", "side": "BUY", "price": 1679.6550000000002, "magnitude": 0.810027351368295, "strategy": "momentum"}
