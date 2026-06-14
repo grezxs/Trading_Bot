@@ -140,9 +140,12 @@ def run_backtest(
             realized=realized_after - realized_before, reason=reason,
         ))
 
+    candle_buf: list[Candle] = []
     for i, c in enumerate(candles):
-        lo = max(0, i + 1 - window)
-        me = MarketEvent(symbol=symbol, price=c.close, candles=candles[lo: i + 1], ts=c.ts)
+        candle_buf.append(c)
+        if len(candle_buf) > window:
+            candle_buf = candle_buf[-window:]
+        me = MarketEvent(symbol=symbol, price=c.close, candles=candle_buf, ts=c.ts)
         portfolio.on_market(me)
         # protective exits (TP/SL) + inventory trim — run before new entries
         for ev in (risk.on_market(me) or []):
@@ -162,3 +165,132 @@ def run_backtest(
 
     result.metrics = compute_metrics(result)
     return result
+
+
+@dataclass
+class MultiSymbolResult:
+    """Aggregated result across multiple symbols sharing one portfolio."""
+    results: dict[str, BacktestResult]
+    starting_cash: float
+    final_equity: float
+    equity_curve: list[tuple[float, float]]
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+def run_multi_backtest(
+    symbol_candles: dict[str, list[Candle]],
+    *,
+    cfg=None,
+    starting_cash: Optional[float] = None,
+    timeframe: str = "1m",
+    taker_fee: Optional[float] = None,
+    order_policy: Optional[dict] = None,
+) -> MultiSymbolResult:
+    """Replay multiple symbols through a SHARED portfolio/risk stack.
+
+    Candles are merged by timestamp and replayed in chronological order,
+    simulating a real multi-asset portfolio rather than isolated single-symbol
+    runs.
+    """
+    if cfg is None:
+        cfg = load_config()
+    if starting_cash is None:
+        starting_cash = float(cfg.starting_cash)
+    if taker_fee is None:
+        taker_fee = float(cfg.get("execution", "taker_fee", default=0.001))
+
+    portfolio, engine, detector, manager, risk = build_modules(cfg, starting_cash, order_policy)
+    broker = MockBroker(starting_cash, taker_fee)
+
+    window = max(int(cfg.kline_limit), cfg.regime_window + 2)
+
+    per_symbol: dict[str, BacktestResult] = {}
+    for sym, candles in symbol_candles.items():
+        per_symbol[sym] = BacktestResult(symbol=sym, timeframe=timeframe,
+                                         starting_cash=starting_cash, candles=candles)
+
+    merged_equity: list[tuple[float, float]] = []
+    candle_bufs: dict[str, list[Candle]] = {s: [] for s in symbol_candles}
+
+    all_events: list[tuple[float, str, int, Candle]] = []
+    for sym, candles in symbol_candles.items():
+        for i, c in enumerate(candles):
+            all_events.append((c.ts, sym, i, c))
+    all_events.sort(key=lambda x: x[0])
+
+    def _execute(order: Order, ref: float, ts: float, reason: str, sym: str) -> None:
+        fill = broker.place(order, ref)
+        if not fill or fill.get("qty", 0) <= 0:
+            return
+        pos = portfolio.positions.get(order.symbol)
+        realized_before = pos.realized_pnl if pos else 0.0
+        portfolio.on_fill(FillEvent(
+            symbol=order.symbol, side=order.side, qty=float(fill["qty"]),
+            price=float(fill["price"]), order_id=order.order_id, fee=float(fill["fee"]),
+        ))
+        realized_after = portfolio.positions[order.symbol].realized_pnl
+        per_symbol[sym].trades.append(Trade(
+            ts=ts, side=order.side.value, qty=float(fill["qty"]),
+            price=float(fill["price"]), fee=float(fill["fee"]),
+            realized=realized_after - realized_before, reason=reason,
+        ))
+
+    for ts, sym, idx, c in all_events:
+        buf = candle_bufs[sym]
+        buf.append(c)
+        if len(buf) > window:
+            candle_bufs[sym] = buf[-window:]
+            buf = candle_bufs[sym]
+
+        me = MarketEvent(symbol=sym, price=c.close, candles=buf, ts=c.ts)
+        portfolio.on_market(me)
+
+        for ev in (risk.on_market(me) or []):
+            if isinstance(ev, OrderEvent):
+                _execute(ev.order, c.close, c.ts, "EXIT", sym)
+
+        detector.on_market(me)
+
+        for sig in (manager.on_market(me) or []):
+            for oe in (risk.on_signal(sig) or []):
+                if isinstance(oe, OrderEvent):
+                    _execute(oe.order, c.close, c.ts, "ENTRY", sym)
+
+        reg = detector.current_regime(sym)
+        per_symbol[sym].regime_series.append((c.ts, reg.value if reg is not None else None))
+        per_symbol[sym].equity_curve.append((c.ts, portfolio.equity))
+        merged_equity.append((c.ts, portfolio.equity))
+
+        if engine.halted:
+            for r in per_symbol.values():
+                r.halted = True
+
+    for r in per_symbol.values():
+        r.metrics = compute_metrics(r)
+
+    combined = MultiSymbolResult(
+        results=per_symbol,
+        starting_cash=starting_cash,
+        final_equity=portfolio.equity,
+        equity_curve=merged_equity,
+    )
+
+    eq = [v for _, v in merged_equity]
+    if eq:
+        peak = eq[0]
+        max_dd_pct = 0.0
+        for v in eq:
+            peak = max(peak, v)
+            if peak > 0:
+                max_dd_pct = max(max_dd_pct, (peak - v) / peak)
+        total_trades = sum(len(r.trades) for r in per_symbol.values())
+        combined.metrics = {
+            "symbols": list(symbol_candles.keys()),
+            "final_equity": round(portfolio.equity, 2),
+            "total_pnl": round(portfolio.equity - starting_cash, 2),
+            "total_return_pct": round((portfolio.equity / starting_cash - 1) * 100, 2),
+            "max_drawdown_pct": round(max_dd_pct * 100, 2),
+            "total_trades": total_trades,
+        }
+
+    return combined
