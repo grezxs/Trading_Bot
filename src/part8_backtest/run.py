@@ -20,7 +20,7 @@ if __package__ in (None, ""):
 
 from src.core.config import load_config
 from src.part8_backtest.data import load_history
-from src.part8_backtest.engine import BacktestResult, run_backtest
+from src.part8_backtest.engine import BacktestResult, MultiSymbolResult, run_backtest, run_multi_backtest
 
 log = logging.getLogger("backtest.cli")
 
@@ -33,10 +33,16 @@ _LABELS = [
     ("max_drawdown_abs", "Max drawdown"),
     ("max_drawdown_pct", "Max drawdown %"),
     ("sharpe", "Sharpe (annualised)"),
+    ("sortino", "Sortino (annualised)"),
+    ("calmar", "Calmar ratio"),
     ("num_trades", "Trades"),
     ("num_closing_trades", "Closing trades"),
     ("win_rate_pct", "Win rate %"),
     ("profit_factor", "Profit factor"),
+    ("avg_win", "Avg win"),
+    ("avg_loss", "Avg loss"),
+    ("max_consec_losses", "Max consec losses"),
+    ("avg_hold_seconds", "Avg hold (sec)"),
     ("fees_paid", "Fees paid"),
     ("halted_on_drawdown", "Halted on drawdown"),
 ]
@@ -86,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config()
     ap = argparse.ArgumentParser(description="Standalone strategy backtester (Part 8)")
     ap.add_argument("--symbol", default=cfg.symbols[0], help="e.g. BTC/USDT")
+    ap.add_argument("--multi", action="store_true",
+                    help="run all configured symbols through a shared portfolio")
     ap.add_argument("--days", type=float, default=30.0, help="history length in days")
     ap.add_argument("--timeframe", default=cfg.timeframe, help="bar size, e.g. 1m 5m 1h")
     ap.add_argument("--source", default=cfg.data_source, choices=["mainnet", "testnet", "mock"],
@@ -94,6 +102,42 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None, help="equity-curve HTML path")
     ap.add_argument("--no-plot", action="store_true", help="skip the HTML chart")
     args = ap.parse_args(argv)
+
+    symbols = cfg.symbols if args.multi else [args.symbol]
+
+    if args.multi and len(symbols) > 1:
+        log.info("multi-symbol backtest: %s, %s days @ %s from %s",
+                 symbols, args.days, args.timeframe, args.source)
+        symbol_candles = {}
+        for sym in symbols:
+            candles = load_history(sym, days=args.days, timeframe=args.timeframe,
+                                   source=args.source)
+            if len(candles) < 2:
+                log.error("%s: not enough history (%d bars)", sym, len(candles))
+                return 1
+            symbol_candles[sym] = candles
+
+        multi = run_multi_backtest(symbol_candles, cfg=cfg, starting_cash=args.cash,
+                                   timeframe=args.timeframe)
+        for sym, res in multi.results.items():
+            print(format_report(res))
+        print("\n" + "=" * 48)
+        print("  COMBINED PORTFOLIO")
+        print("=" * 48)
+        for k, v in multi.metrics.items():
+            if isinstance(v, float):
+                v = f"{v:,.2f}"
+            print(f"  {k:<22} {v}")
+        print("=" * 48)
+
+        if not args.no_plot:
+            out = Path(args.out) if args.out else (Path("runtime") / "backtest_multi.html")
+            dummy = BacktestResult(symbol="PORTFOLIO", timeframe=args.timeframe,
+                                   starting_cash=args.cash, candles=[],
+                                   equity_curve=multi.equity_curve)
+            if save_equity_html(dummy, out):
+                print(f"\n  equity curve -> {out}")
+        return 0
 
     log.info("loading %s history: %s days @ %s from %s",
              args.symbol, args.days, args.timeframe, args.source)
